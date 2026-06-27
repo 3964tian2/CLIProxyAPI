@@ -20,7 +20,8 @@ import (
 )
 
 const (
-	DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
+	DefaultPanelGitHubRepository = "https://github.com/kogekiplay/Cli-Proxy-API-Management-Center"
+	legacyPanelGitHubRepository  = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
 	DefaultPprofAddr             = "127.0.0.1:8316"
 	DefaultAuthDir               = "~/.cli-proxy-api"
 )
@@ -145,6 +146,9 @@ type Config struct {
 
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
+
+	// OpenCodeGo stores accounts imported from the OpenCode Go browser helper.
+	OpenCodeGo OpenCodeGoConfig `yaml:"opencode-go,omitempty" json:"opencode-go,omitempty"`
 
 	// VertexCompatAPIKey defines Vertex AI-compatible API key configurations for third-party providers.
 	// Used for services that use Vertex AI-style paths but with simple API key authentication.
@@ -308,6 +312,14 @@ type RemoteManagement struct {
 	// PanelGitHubRepository overrides the GitHub repository used to fetch the management panel asset.
 	// Accepts either a repository URL (https://github.com/org/repo) or an API releases endpoint.
 	PanelGitHubRepository string `yaml:"panel-github-repository"`
+}
+
+func normalizePanelGitHubRepository(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" || strings.EqualFold(trimmed, legacyPanelGitHubRepository) {
+		return DefaultPanelGitHubRepository
+	}
+	return trimmed
 }
 
 // QuotaExceeded defines the behavior when API quota limits are exceeded.
@@ -630,6 +642,48 @@ type OpenAICompatibility struct {
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
 }
 
+// OpenCodeGoConfig stores account data synced by the OpenCode Go userscript.
+type OpenCodeGoConfig struct {
+	ProviderName string              `yaml:"provider-name,omitempty" json:"provider-name,omitempty"`
+	BaseURL      string              `yaml:"base-url,omitempty" json:"base-url,omitempty"`
+	Accounts     []OpenCodeGoAccount `yaml:"accounts,omitempty" json:"accounts,omitempty"`
+}
+
+// OpenCodeGoAccount stores one OpenCode Go account imported by the browser helper.
+type OpenCodeGoAccount struct {
+	ID                 string                  `yaml:"id" json:"id"`
+	Alias              string                  `yaml:"alias,omitempty" json:"alias,omitempty"`
+	Email              string                  `yaml:"email,omitempty" json:"email,omitempty"`
+	Username           string                  `yaml:"username,omitempty" json:"username,omitempty"`
+	WorkspaceID        string                  `yaml:"workspace-id,omitempty" json:"workspace-id,omitempty"`
+	APIKey             string                  `yaml:"api-key,omitempty" json:"api-key,omitempty"`
+	Cookie             string                  `yaml:"cookie,omitempty" json:"cookie,omitempty"`
+	Usage              OpenCodeGoUsageSnapshot `yaml:"usage,omitempty" json:"usage,omitempty"`
+	ProviderName       string                  `yaml:"provider-name,omitempty" json:"provider-name,omitempty"`
+	BaseURL            string                  `yaml:"base-url,omitempty" json:"base-url,omitempty"`
+	APIKeySynced       bool                    `yaml:"api-key-synced,omitempty" json:"api-key-synced,omitempty"`
+	ProviderKeyManaged bool                    `yaml:"provider-key-managed,omitempty" json:"provider-key-managed,omitempty"`
+	ProviderSyncedAt   string                  `yaml:"provider-synced-at,omitempty" json:"provider-synced-at,omitempty"`
+	ProviderSyncError  string                  `yaml:"provider-sync-error,omitempty" json:"provider-sync-error,omitempty"`
+	CreatedAt          string                  `yaml:"created-at,omitempty" json:"created-at,omitempty"`
+	UpdatedAt          string                  `yaml:"updated-at,omitempty" json:"updated-at,omitempty"`
+	LastSyncedAt       string                  `yaml:"last-synced-at,omitempty" json:"last-synced-at,omitempty"`
+}
+
+// OpenCodeGoUsageSnapshot stores usage windows reported for an OpenCode Go account.
+type OpenCodeGoUsageSnapshot struct {
+	Rolling OpenCodeGoUsageWindow `yaml:"rolling,omitempty" json:"rolling,omitempty"`
+	Weekly  OpenCodeGoUsageWindow `yaml:"weekly,omitempty" json:"weekly,omitempty"`
+	Monthly OpenCodeGoUsageWindow `yaml:"monthly,omitempty" json:"monthly,omitempty"`
+}
+
+// OpenCodeGoUsageWindow stores usage and reset metadata for one time window.
+type OpenCodeGoUsageWindow struct {
+	Used    float64 `yaml:"used,omitempty" json:"used"`
+	Limit   float64 `yaml:"limit,omitempty" json:"limit"`
+	ResetAt string  `yaml:"reset-at,omitempty" json:"reset-at,omitempty"`
+}
+
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.
 type OpenAICompatibilityAPIKey struct {
 	// APIKey is the authentication key for accessing the external API services.
@@ -637,6 +691,9 @@ type OpenAICompatibilityAPIKey struct {
 
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// Source records the system that created this API key entry.
+	Source string `yaml:"source,omitempty" json:"source,omitempty"`
 }
 
 // OpenAICompatibilityModel represents a model configuration for OpenAI compatibility,
@@ -727,6 +784,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		}
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
+	cfg.SanitizeAPIKeyAccess()
 
 	// Hash remote management key if plaintext is detected (nested)
 	// We consider a value to be already hashed if it looks like a bcrypt hash ($2a$, $2b$, or $2y$ prefix).
@@ -742,10 +800,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		_ = SaveConfigPreserveCommentsUpdateNestedScalar(configFile, []string{"remote-management", "secret-key"}, hashed)
 	}
 
-	cfg.RemoteManagement.PanelGitHubRepository = strings.TrimSpace(cfg.RemoteManagement.PanelGitHubRepository)
-	if cfg.RemoteManagement.PanelGitHubRepository == "" {
-		cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
-	}
+	cfg.RemoteManagement.PanelGitHubRepository = normalizePanelGitHubRepository(cfg.RemoteManagement.PanelGitHubRepository)
 
 	cfg.Pprof.Addr = strings.TrimSpace(cfg.Pprof.Addr)
 	if cfg.Pprof.Addr == "" {

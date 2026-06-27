@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
@@ -45,6 +46,9 @@ func TestParseOpenAIUsageResponses(t *testing.T) {
 	}
 	if detail.CachedTokens != 7 {
 		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 7)
+	}
+	if detail.CacheReadTokens != 7 {
+		t.Fatalf("cache read tokens = %d, want %d", detail.CacheReadTokens, 7)
 	}
 	if detail.ReasoningTokens != 9 {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 9)
@@ -136,6 +140,28 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 	}
 	if record.Latency > 3*time.Second {
 		t.Fatalf("latency = %v, want <= 3s", record.Latency)
+	}
+}
+
+func TestUsageReporterPrefersOpenCodeGoSourceOverAPIKeyAccountInfo(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Provider: "opencode-go",
+		Attributes: map[string]string{
+			cliproxyauth.AttributeAPIKey: "sk-opencode-account",
+			cliproxyauth.AttributeSource: "opencode-go:acc_1",
+		},
+	}
+	reporter := NewUsageReporter(context.Background(), "opencode-go", "claude-sonnet-4", auth)
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+
+	if record.Source != "opencode-go:acc_1" {
+		t.Fatalf("source = %q, want opencode-go account source", record.Source)
+	}
+	if record.CredentialKeyHash == "" {
+		t.Fatal("credential key hash is empty")
+	}
+	if record.APIKey != "" {
+		t.Fatalf("client api key = %q, want empty without CPA request context", record.APIKey)
 	}
 }
 

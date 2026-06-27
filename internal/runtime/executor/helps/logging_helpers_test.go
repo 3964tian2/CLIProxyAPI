@@ -11,6 +11,7 @@ import (
 
 func TestRecordAPIResponseMetadataStoresHeadersWhenRequestLogDisabled(t *testing.T) {
 	ctx := logging.WithResponseHeadersHolder(context.Background())
+	ctx = logging.WithResponseStatusHolder(ctx)
 	headers := http.Header{}
 	headers.Add("X-Upstream-Request-Id", "upstream-req-1")
 
@@ -20,5 +21,8 @@ func TestRecordAPIResponseMetadataStoresHeadersWhenRequestLogDisabled(t *testing
 	got := logging.GetResponseHeaders(ctx)
 	if got.Get("X-Upstream-Request-Id") != "upstream-req-1" {
 		t.Fatalf("response header = %q, want %q", got.Get("X-Upstream-Request-Id"), "upstream-req-1")
+	}
+	if status := logging.GetResponseStatus(ctx); status != http.StatusOK {
+		t.Fatalf("response status = %d, want %d", status, http.StatusOK)
 	}
 }

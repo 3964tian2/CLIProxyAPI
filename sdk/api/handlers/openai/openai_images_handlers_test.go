@@ -85,6 +85,20 @@ func TestImagesModelValidationAllowsOpenAICompatImageModels(t *testing.T) {
 	}
 }
 
+func TestNormalizeImagesRequestedModelDefaultsEmptyAndUnknown(t *testing.T) {
+	for _, model := range []string{"", " ", "unknown", " UNKNOWN ", "codex/unknown", "# unknown"} {
+		if got := normalizeImagesRequestedModel(model); got != defaultImagesToolModel {
+			t.Fatalf("normalizeImagesRequestedModel(%q) = %q, want %q", model, got, defaultImagesToolModel)
+		}
+	}
+	if got := normalizeImagesRequestedModel("gpt-5.4-mini"); got != "gpt-5.4-mini" {
+		t.Fatalf("normalizeImagesRequestedModel() changed explicit unsupported model to %q", got)
+	}
+	if got := normalizeImagesRequestedModel("xai/grok-imagine-image"); got != "xai/grok-imagine-image" {
+		t.Fatalf("normalizeImagesRequestedModel() changed provider-prefixed image model to %q", got)
+	}
+}
+
 func TestBuildXAIImagesGenerationsRequest(t *testing.T) {
 	rawJSON := []byte(`{"model":"xai/grok-imagine-image-quality","prompt":"abstract art","aspect_ratio":"landscape","resolution":"2k","n":2,"response_format":"url"}`)
 

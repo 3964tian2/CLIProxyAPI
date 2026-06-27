@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginstore"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usageledger"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -60,6 +61,7 @@ type Handler struct {
 	pluginStoreHTTPClient   pluginstore.HTTPDoer
 	pluginReleaseCacheMu    sync.Mutex
 	pluginReleaseCache      map[string]pluginReleaseCacheEntry
+	usageLedger             usageledger.Store
 }
 
 type configReloadSnapshot struct {
@@ -158,6 +160,25 @@ func (h *Handler) SetConfigReloadHook(hook func(context.Context, *config.Config)
 	h.mu.Lock()
 	h.configReloadHook = hook
 	h.mu.Unlock()
+}
+
+// SetUsageLedger updates the store used by management usage and price endpoints.
+func (h *Handler) SetUsageLedger(store usageledger.Store) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.usageLedger = store
+	h.mu.Unlock()
+}
+
+func (h *Handler) getUsageLedger() usageledger.Store {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.usageLedger
 }
 
 // reloadSnapshotConfigLocked clones the runtime config and assigns a reload generation.
@@ -412,6 +433,9 @@ func (h *Handler) persistLocked(c *gin.Context) bool {
 		return false
 	}
 	snapshot := h.reloadSnapshotConfigLocked()
+	if h.authManager != nil {
+		h.authManager.SetConfig(snapshot.cfg)
+	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	var reqCtx context.Context
 	if c != nil && c.Request != nil {

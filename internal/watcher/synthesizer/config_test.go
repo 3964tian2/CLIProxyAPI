@@ -1,6 +1,7 @@
 package synthesizer
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -438,6 +439,39 @@ func TestConfigSynthesizer_OpenAICompat_UsesNamespacedProviderKey(t *testing.T) 
 	}
 	if auth.Attributes["compat_name"] != "kimi" {
 		t.Fatalf("compat_name = %q, want kimi", auth.Attributes["compat_name"])
+	}
+}
+
+func TestConfigSynthesizer_OpenAICompat_PreservesAPIKeyEntrySource(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{
+				{
+					Name:    "opencode-go",
+					BaseURL: "https://opencode.ai/zen/go/v1",
+					APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+						{APIKey: "sk-opencode", Source: "opencode-go:acc_1"},
+					},
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if got := auths[0].Attributes["usage_source"]; got != "opencode-go:acc_1" {
+		t.Fatalf("usage_source = %q, want opencode-go:acc_1", got)
+	}
+	if got := auths[0].Attributes["source"]; !strings.HasPrefix(got, "config:opencode-go[") {
+		t.Fatalf("source = %q, want config source preserved", got)
 	}
 }
 

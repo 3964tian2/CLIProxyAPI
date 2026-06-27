@@ -137,6 +137,7 @@ func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequ
 
 // RecordAPIResponseMetadata captures upstream response status/header information for the latest attempt.
 func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
+	logging.SetResponseStatus(ctx, status)
 	logging.SetResponseHeaders(ctx, headers)
 	if !requestLogCaptureEnabled(cfg) {
 		return

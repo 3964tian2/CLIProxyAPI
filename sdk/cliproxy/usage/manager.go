@@ -20,11 +20,14 @@ type Record struct {
 	ExecutorType string
 	Model        string
 	Alias        string
-	APIKey       string
-	AuthID       string
-	AuthIndex    string
-	AuthType     string
-	Source       string
+	// APIKey stores the client key used to call CPA, when available.
+	APIKey string
+	// CredentialKeyHash stores the non-reversible hash of the upstream API key credential.
+	CredentialKeyHash string
+	AuthID            string
+	AuthIndex         string
+	AuthType          string
+	Source            string
 	// ReasoningEffort stores the translated upstream thinking level for request event logs.
 	ReasoningEffort string
 	// ServiceTier stores the client-requested service tier for request event logs.

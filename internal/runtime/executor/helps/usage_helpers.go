@@ -3,6 +3,8 @@ package helps
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -22,23 +24,24 @@ import (
 )
 
 type UsageReporter struct {
-	provider     string
-	executorType string
-	model        string
-	alias        string
-	authID       string
-	authIndex    string
-	authType     string
-	apiKey       string
-	source       string
-	reasoning    string
-	serviceTier  string
-	requestedAt  time.Time
-	ttftMu       sync.RWMutex
-	ttft         time.Duration
-	ttftStart    time.Time
-	ttftSet      bool
-	once         sync.Once
+	provider          string
+	executorType      string
+	model             string
+	alias             string
+	authID            string
+	authIndex         string
+	authType          string
+	apiKey            string
+	credentialKeyHash string
+	source            string
+	reasoning         string
+	serviceTier       string
+	requestedAt       time.Time
+	ttftMu            sync.RWMutex
+	ttft              time.Duration
+	ttftStart         time.Time
+	ttftSet           bool
+	once              sync.Once
 }
 
 type usageExecutor interface {
@@ -62,15 +65,16 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		alias = model
 	}
 	reporter := &UsageReporter{
-		provider:    provider,
-		model:       model,
-		alias:       strings.TrimSpace(alias),
-		requestedAt: time.Now(),
-		apiKey:      apiKey,
-		source:      resolveUsageSource(auth, apiKey),
-		authType:    resolveUsageAuthType(auth),
-		reasoning:   usage.ReasoningEffortFromContext(ctx),
-		serviceTier: usage.ServiceTierFromContext(ctx),
+		provider:          provider,
+		model:             model,
+		alias:             strings.TrimSpace(alias),
+		requestedAt:       time.Now(),
+		apiKey:            apiKey,
+		credentialKeyHash: resolveCredentialKeyHash(auth),
+		source:            resolveUsageSource(auth, apiKey),
+		authType:          resolveUsageAuthType(auth),
+		reasoning:         usage.ReasoningEffortFromContext(ctx),
+		serviceTier:       usage.ServiceTierFromContext(ctx),
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
@@ -260,23 +264,24 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		return usage.Record{Model: model, Detail: detail, Failed: failed, Fail: fail}
 	}
 	return usage.Record{
-		Provider:        r.provider,
-		ExecutorType:    r.executorType,
-		Model:           model,
-		Alias:           r.alias,
-		Source:          r.source,
-		APIKey:          r.apiKey,
-		AuthID:          r.authID,
-		AuthIndex:       r.authIndex,
-		AuthType:        r.authType,
-		ReasoningEffort: r.reasoning,
-		ServiceTier:     r.serviceTier,
-		RequestedAt:     r.requestedAt,
-		Latency:         r.latency(),
-		TTFT:            r.ttftDuration(),
-		Failed:          failed,
-		Fail:            fail,
-		Detail:          detail,
+		Provider:          r.provider,
+		ExecutorType:      r.executorType,
+		Model:             model,
+		Alias:             r.alias,
+		Source:            r.source,
+		APIKey:            r.apiKey,
+		CredentialKeyHash: r.credentialKeyHash,
+		AuthID:            r.authID,
+		AuthIndex:         r.authIndex,
+		AuthType:          r.authType,
+		ReasoningEffort:   r.reasoning,
+		ServiceTier:       r.serviceTier,
+		RequestedAt:       r.requestedAt,
+		Latency:           r.latency(),
+		TTFT:              r.ttftDuration(),
+		Failed:            failed,
+		Fail:              fail,
+		Detail:            detail,
 	}
 }
 
@@ -401,8 +406,29 @@ func APIKeyFromContext(ctx context.Context) string {
 	return ""
 }
 
+func resolveCredentialKeyHash(auth *cliproxyauth.Auth) string {
+	if auth == nil || auth.AuthKind() != cliproxyauth.AuthKindAPIKey {
+		return ""
+	}
+	_, apiKey := auth.AccountInfo()
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(apiKey))
+	return hex.EncodeToString(sum[:])
+}
+
 func resolveUsageSource(auth *cliproxyauth.Auth, ctxAPIKey string) string {
 	if auth != nil {
+		if auth.Attributes != nil {
+			if source := strings.TrimSpace(auth.Attributes["usage_source"]); strings.HasPrefix(source, "opencode-go:") {
+				return source
+			}
+			if source := strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeSource]); strings.HasPrefix(source, "opencode-go:") {
+				return source
+			}
+		}
 		provider := strings.TrimSpace(auth.Provider)
 		if strings.EqualFold(provider, "vertex") {
 			if auth.Metadata != nil {
@@ -506,6 +532,7 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	}
 	if cached.Exists() {
 		detail.CachedTokens = cached.Int()
+		detail.CacheReadTokens = cached.Int()
 	}
 	reasoning := usageNode.Get("completion_tokens_details.reasoning_tokens")
 	if !reasoning.Exists() {

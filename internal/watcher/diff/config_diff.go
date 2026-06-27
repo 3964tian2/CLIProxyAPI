@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"reflect"
+	"sort"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -118,6 +119,11 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		changes = append(changes, fmt.Sprintf("api-keys count: %d -> %d", len(oldCfg.APIKeys), len(newCfg.APIKeys)))
 	} else if !reflect.DeepEqual(trimStrings(oldCfg.APIKeys), trimStrings(newCfg.APIKeys)) {
 		changes = append(changes, "api-keys: values updated (count unchanged, redacted)")
+	}
+	oldAccess := canonicalAPIKeyAccessRules(oldCfg.APIKeyAccess)
+	newAccess := canonicalAPIKeyAccessRules(newCfg.APIKeyAccess)
+	if len(oldAccess) != len(newAccess) || !reflect.DeepEqual(oldAccess, newAccess) {
+		changes = append(changes, fmt.Sprintf("api-key-access: updated (%d -> %d rules, redacted)", len(oldAccess), len(newAccess)))
 	}
 	if len(oldCfg.GeminiKey) != len(newCfg.GeminiKey) {
 		changes = append(changes, fmt.Sprintf("gemini-api-key count: %d -> %d", len(oldCfg.GeminiKey), len(newCfg.GeminiKey)))
@@ -325,6 +331,26 @@ func trimStrings(in []string) []string {
 		out[i] = strings.TrimSpace(in[i])
 	}
 	return out
+}
+
+func canonicalAPIKeyAccessRules(rules map[string]config.APIKeyAccessRule) map[string]config.APIKeyAccessRule {
+	normalized := config.NormalizeAPIKeyAccessRules(rules)
+	if len(normalized) == 0 {
+		return nil
+	}
+	canonical := config.CloneAPIKeyAccessRules(normalized)
+	for key, rule := range canonical {
+		sort.Strings(rule.Providers)
+		sort.Slice(rule.ProviderTargets, func(i, j int) bool {
+			if rule.ProviderTargets[i].Provider != rule.ProviderTargets[j].Provider {
+				return rule.ProviderTargets[i].Provider < rule.ProviderTargets[j].Provider
+			}
+			return rule.ProviderTargets[i].BaseURL < rule.ProviderTargets[j].BaseURL
+		})
+		sort.Strings(rule.AuthFiles)
+		canonical[key] = rule
+	}
+	return canonical
 }
 
 func appendPayloadConfigChanges(changes []string, oldPayload, newPayload config.PayloadConfig) []string {

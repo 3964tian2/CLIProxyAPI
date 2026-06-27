@@ -375,7 +375,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 	contents := gjson.GetBytes(out, "contents")
 	if contents.Exists() && contents.IsArray() {
 		arr := contents.Array()
-		if len(arr) > 0 && arr[len(arr)-1].Get("role").String() == "model" {
+		if len(arr) > 0 && isTrailingOpenAIResponsesAssistantPrefill(arr[len(arr)-1]) {
 			out, _ = sjson.DeleteBytes(out, fmt.Sprintf("contents.%d", len(arr)-1))
 		}
 	}
@@ -471,6 +471,23 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 func openAIResponsesGeminiThoughtSignature(rawSignature string) string {
 	return sigcompat.GeminiReplaySignatureOrBypass(rawSignature, sigcompat.SignatureBlockKindGeminiModelPart)
+}
+
+func isTrailingOpenAIResponsesAssistantPrefill(content gjson.Result) bool {
+	if content.Get("role").String() != "model" {
+		return false
+	}
+	parts := content.Get("parts")
+	if !parts.IsArray() {
+		return false
+	}
+	for _, part := range parts.Array() {
+		if part.Get("thought").Bool() {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func applyOpenAIResponsesTextFormatToGemini(out []byte, root gjson.Result) []byte {

@@ -45,10 +45,7 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 		cfg.RemoteManagement.SecretKey = string(hashed)
 	}
 
-	cfg.RemoteManagement.PanelGitHubRepository = strings.TrimSpace(cfg.RemoteManagement.PanelGitHubRepository)
-	if cfg.RemoteManagement.PanelGitHubRepository == "" {
-		cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
-	}
+	cfg.RemoteManagement.PanelGitHubRepository = normalizePanelGitHubRepository(cfg.RemoteManagement.PanelGitHubRepository)
 
 	cfg.Pprof.Addr = strings.TrimSpace(cfg.Pprof.Addr)
 	if cfg.Pprof.Addr == "" {
@@ -87,6 +84,7 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.OAuthExcludedModels = NormalizeOAuthExcludedModels(cfg.OAuthExcludedModels)
 	cfg.SanitizeOAuthModelAlias()
 	cfg.SanitizePayloadRules()
+	cfg.SanitizeAPIKeyAccess()
 
 	return &cfg, nil
 }

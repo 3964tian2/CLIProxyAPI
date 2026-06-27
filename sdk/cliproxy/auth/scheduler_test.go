@@ -258,6 +258,76 @@ func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledAcrossPriorities(t *
 	}
 }
 
+func TestSchedulerPickSingleScoped_ExcludesDisallowedHigherPriorityAuth(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "allowed-low", Provider: "gemini", Attributes: map[string]string{"priority": "0"}},
+		&Auth{ID: "denied-high", Provider: "gemini", Attributes: map[string]string{"priority": "10"}},
+	)
+
+	got, errPick := scheduler.pickSingleScoped(
+		context.Background(),
+		"gemini",
+		"",
+		cliproxyexecutor.Options{},
+		nil,
+		func(auth *Auth) bool { return auth != nil && auth.ID == "allowed-low" },
+	)
+	if errPick != nil {
+		t.Fatalf("pickSingleScoped() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatalf("pickSingleScoped() auth = nil")
+	}
+	if got.ID != "allowed-low" {
+		t.Fatalf("pickSingleScoped() auth.ID = %q, want allowed-low", got.ID)
+	}
+}
+
+func TestSchedulerPickSingleScoped_ReturnsCooldownForAllowedSubset(t *testing.T) {
+	t.Parallel()
+
+	model := "gemini-2.5-pro"
+	registerSchedulerModels(t, "gemini", model, "allowed-cooldown", "denied-ready")
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{
+			ID:       "allowed-cooldown",
+			Provider: "gemini",
+			ModelStates: map[string]*ModelState{
+				model: {
+					Status:         StatusError,
+					Unavailable:    true,
+					NextRetryAfter: time.Now().Add(time.Hour),
+					Quota: QuotaState{
+						Exceeded:      true,
+						NextRecoverAt: time.Now().Add(time.Hour),
+					},
+				},
+			},
+		},
+		&Auth{ID: "denied-ready", Provider: "gemini"},
+	)
+
+	got, errPick := scheduler.pickSingleScoped(
+		context.Background(),
+		"gemini",
+		model,
+		cliproxyexecutor.Options{},
+		nil,
+		func(auth *Auth) bool { return auth != nil && auth.ID == "allowed-cooldown" },
+	)
+	if got != nil {
+		t.Fatalf("pickSingleScoped() auth = %#v, want nil", got)
+	}
+	var cooldownErr *modelCooldownError
+	if !errors.As(errPick, &cooldownErr) {
+		t.Fatalf("pickSingleScoped() error = %v, want model cooldown error", errPick)
+	}
+}
+
 func TestSchedulerPick_MixedProvidersUsesWeightedProviderRotationOverReadyCandidates(t *testing.T) {
 	t.Parallel()
 
@@ -284,6 +354,66 @@ func TestSchedulerPick_MixedProvidersUsesWeightedProviderRotationOverReadyCandid
 		if got.ID != wantIDs[index] {
 			t.Fatalf("pickMixed() #%d auth.ID = %q, want %q", index, got.ID, wantIDs[index])
 		}
+	}
+}
+
+func TestSchedulerPickMixedNormalized_UsesWeightedProviderRotation(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "gemini-a", Provider: "gemini"},
+		&Auth{ID: "gemini-b", Provider: "gemini"},
+		&Auth{ID: "claude-a", Provider: "claude"},
+	)
+
+	wantProviders := []string{"gemini", "gemini", "claude", "gemini"}
+	wantIDs := []string{"gemini-a", "gemini-b", "claude-a", "gemini-a"}
+	for index := range wantProviders {
+		got, provider, errPick := scheduler.pickMixedNormalized(context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, nil, nil)
+		if errPick != nil {
+			t.Fatalf("pickMixedNormalized() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickMixedNormalized() #%d auth = nil", index)
+		}
+		if provider != wantProviders[index] {
+			t.Fatalf("pickMixedNormalized() #%d provider = %q, want %q", index, provider, wantProviders[index])
+		}
+		if got.ID != wantIDs[index] {
+			t.Fatalf("pickMixedNormalized() #%d auth.ID = %q, want %q", index, got.ID, wantIDs[index])
+		}
+	}
+}
+
+func TestSchedulerPickMixedScoped_ExcludesDisallowedHigherPriorityAuth(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "allowed-gemini", Provider: "gemini", Attributes: map[string]string{"priority": "0"}},
+		&Auth{ID: "denied-claude", Provider: "claude", Attributes: map[string]string{"priority": "10"}},
+	)
+
+	got, provider, errPick := scheduler.pickMixedScoped(
+		context.Background(),
+		[]string{"gemini", "claude"},
+		"",
+		cliproxyexecutor.Options{},
+		nil,
+		func(auth *Auth) bool { return auth != nil && auth.ID == "allowed-gemini" },
+	)
+	if errPick != nil {
+		t.Fatalf("pickMixedScoped() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatalf("pickMixedScoped() auth = nil")
+	}
+	if got.ID != "allowed-gemini" {
+		t.Fatalf("pickMixedScoped() auth.ID = %q, want allowed-gemini", got.ID)
+	}
+	if provider != "gemini" {
+		t.Fatalf("pickMixedScoped() provider = %q, want gemini", provider)
 	}
 }
 

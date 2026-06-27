@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -183,6 +184,68 @@ func TestBuildConfigChangeDetails_SecretsAndCounts(t *testing.T) {
 	details := BuildConfigChangeDetails(oldCfg, newCfg)
 	expectContains(t, details, "api-keys count: 1 -> 3")
 	expectContains(t, details, "remote-management.secret-key: created")
+}
+
+func TestBuildConfigChangeDetails_APIKeyAccessRedacted(t *testing.T) {
+	oldCfg := &config.Config{
+		SDKConfig: sdkconfig.SDKConfig{
+			APIKeyAccess: map[string]config.APIKeyAccessRule{
+				"sk-old-secret": {Providers: []string{"gemini"}},
+			},
+		},
+	}
+	newCfg := &config.Config{
+		SDKConfig: sdkconfig.SDKConfig{
+			APIKeyAccess: map[string]config.APIKeyAccessRule{
+				"sk-new-secret": {AuthFiles: []string{"auth-1.json"}},
+			},
+		},
+	}
+
+	details := BuildConfigChangeDetails(oldCfg, newCfg)
+
+	expectContains(t, details, "api-key-access: updated (1 -> 1 rules, redacted)")
+	joined := strings.Join(details, "\n")
+	if strings.Contains(joined, "sk-old-secret") {
+		t.Fatalf("diff leaked old client API key: %v", details)
+	}
+	if strings.Contains(joined, "sk-new-secret") {
+		t.Fatalf("diff leaked new client API key: %v", details)
+	}
+	if strings.Contains(joined, "auth-1.json") || strings.Contains(joined, "gemini") {
+		t.Fatalf("diff leaked access targets: %v", details)
+	}
+}
+
+func TestBuildConfigChangeDetails_APIKeyAccessCanonicalizesSets(t *testing.T) {
+	oldCfg := &config.Config{
+		SDKConfig: sdkconfig.SDKConfig{
+			APIKeyAccess: map[string]config.APIKeyAccessRule{
+				"sk-client": {
+					Providers: []string{" Gemini ", "claude", "gemini"},
+					AuthFiles: []string{" auth-b.json ", "auth-a.json", "auth-a.json"},
+				},
+			},
+		},
+	}
+	newCfg := &config.Config{
+		SDKConfig: sdkconfig.SDKConfig{
+			APIKeyAccess: map[string]config.APIKeyAccessRule{
+				"sk-client": {
+					Providers: []string{"CLAUDE", "gemini"},
+					AuthFiles: []string{"auth-a.json", "auth-b.json"},
+				},
+			},
+		},
+	}
+
+	details := BuildConfigChangeDetails(oldCfg, newCfg)
+
+	for _, detail := range details {
+		if strings.Contains(detail, "api-key-access") {
+			t.Fatalf("unexpected api-key-access diff for equivalent sets: %v", details)
+		}
+	}
 }
 
 func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {

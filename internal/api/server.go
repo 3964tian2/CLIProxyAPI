@@ -34,6 +34,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usageledger"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
@@ -42,6 +43,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/openai"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/http2"
 	"gopkg.in/yaml.v3"
@@ -239,6 +241,8 @@ type Server struct {
 	keepAliveOnTimeout func()
 	keepAliveHeartbeat chan struct{}
 	keepAliveStop      chan struct{}
+
+	modelsResponseCache *modelsResponseCache
 }
 
 // NewServer creates and initializes a new API server instance.
@@ -315,6 +319,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		envManagementSecret: envManagementSecret,
 		wsRoutes:            make(map[string]struct{}),
 		pluginHost:          optionState.pluginHost,
+		modelsResponseCache: newModelsResponseCache(),
 	}
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	s.handlers.SetPluginHost(optionState.pluginHost)
@@ -326,6 +331,8 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
 	s.applyAccessConfig(nil, cfg)
 	if authManager != nil {
+		authManager.SetConfig(cfg)
+		authManager.SetOAuthModelAlias(cfg.OAuthModelAlias)
 		authManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second, cfg.MaxRetryCredentials)
 	}
 	managementasset.SetCurrentConfig(cfg)
@@ -347,6 +354,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	if optionState.postAuthPersistHook != nil {
 		s.mgmt.SetPostAuthPersistHook(optionState.postAuthPersistHook)
 	}
+	s.initUsageLedger()
 	s.localPassword = optionState.localPassword
 
 	// Home heartbeat gate: when home is enabled, block all endpoints with 503 until the
@@ -385,6 +393,39 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	return s
 }
 
+func (s *Server) initUsageLedger() {
+	if s == nil || s.mgmt == nil {
+		return
+	}
+	ledgerDir := ""
+	if s.cfg != nil {
+		ledgerDir = strings.TrimSpace(s.cfg.AuthDir)
+	}
+	if ledgerDir == "" {
+		ledgerDir = filepath.Dir(strings.TrimSpace(s.configFilePath))
+		if ledgerDir == "" || ledgerDir == "." {
+			ledgerDir = strings.TrimSpace(s.currentPath)
+		}
+	}
+	if ledgerDir == "" {
+		ledgerDir = "."
+	}
+	if err := os.MkdirAll(ledgerDir, 0o755); err != nil {
+		log.WithError(err).Warn("usage ledger: failed to create storage directory")
+		return
+	}
+	store, err := usageledger.OpenSQLite(filepath.Join(ledgerDir, "usage-ledger.sqlite"))
+	if err != nil {
+		log.WithError(err).Warn("usage ledger: failed to open sqlite store")
+		return
+	}
+	if _, err := store.CleanupBefore(context.Background(), time.Now().AddDate(0, 0, -60)); err != nil {
+		log.WithError(err).Warn("usage ledger: failed to clean old events")
+	}
+	coreusage.RegisterNamedPlugin("usage-ledger", usageledger.NewPlugin(store, time.Now))
+	s.mgmt.SetUsageLedger(store)
+}
+
 func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if s == nil || s.cfg == nil || !s.cfg.Home.Enabled {
@@ -393,7 +434,7 @@ func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
 		}
 		if c != nil && c.Request != nil {
 			path := c.Request.URL.Path
-			if strings.HasPrefix(path, "/v0/management/") || path == "/v0/management" || strings.HasPrefix(path, "/v0/resource/plugins/") || path == "/management.html" {
+			if strings.HasPrefix(path, "/v0/management/") || path == "/v0/management" || strings.HasPrefix(path, "/v0/resource/plugins/") || path == "/management.html" || path == "/next.html" {
 				c.Next()
 				return
 			}
@@ -422,6 +463,7 @@ func (s *Server) setupRoutes() {
 	s.engine.HEAD("/healthz", healthzHandler)
 
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
+	s.engine.GET("/next.html", s.serveNextControlPanel)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(s.handlers)
@@ -654,8 +696,18 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/api-keys", s.mgmt.PutAPIKeys)
 		mgmt.PATCH("/api-keys", s.mgmt.PatchAPIKeys)
 		mgmt.DELETE("/api-keys", s.mgmt.DeleteAPIKeys)
+		mgmt.GET("/api-key-access", s.mgmt.GetAPIKeyAccess)
+		mgmt.PUT("/api-key-access", s.mgmt.PutAPIKeyAccess)
+		mgmt.PATCH("/api-key-access", s.mgmt.PatchAPIKeyAccess)
+		mgmt.DELETE("/api-key-access", s.mgmt.DeleteAPIKeyAccess)
 		mgmt.GET("/api-key-usage", s.mgmt.GetAPIKeyUsage)
 		mgmt.GET("/usage-queue", s.mgmt.GetUsageQueue)
+		mgmt.GET("/usage-summary", s.mgmt.GetUsageSummary)
+		mgmt.POST("/usage-analytics", s.mgmt.PostUsageAnalytics)
+		mgmt.GET("/model-prices", s.mgmt.GetModelPrices)
+		mgmt.PUT("/model-prices", s.mgmt.PutModelPrices)
+		mgmt.PATCH("/model-prices/:model", s.mgmt.PatchModelPrice)
+		mgmt.DELETE("/model-prices/:model", s.mgmt.DeleteModelPrice)
 
 		mgmt.GET("/gemini-api-key", s.mgmt.GetGeminiKeys)
 		mgmt.PUT("/gemini-api-key", s.mgmt.PutGeminiKeys)
@@ -703,6 +755,14 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/openai-compatibility", s.mgmt.PutOpenAICompat)
 		mgmt.PATCH("/openai-compatibility", s.mgmt.PatchOpenAICompat)
 		mgmt.DELETE("/openai-compatibility", s.mgmt.DeleteOpenAICompat)
+
+		mgmt.GET("/opencode-go/accounts", s.mgmt.ListOpenCodeGoAccounts)
+		mgmt.POST("/opencode-go/sync", s.mgmt.SyncOpenCodeGoAccount)
+		mgmt.POST("/opencode-go/accounts/:id/refresh-usage", s.mgmt.RefreshOpenCodeGoUsage)
+		mgmt.POST("/opencode-go/accounts/:id/sync-provider", s.mgmt.SyncOpenCodeGoProvider)
+		mgmt.DELETE("/opencode-go/accounts/:id", s.mgmt.DeleteOpenCodeGoAccount)
+		mgmt.GET("/opencode-go/accounts/:id/switch-cookie", s.mgmt.GetOpenCodeGoSwitchCookie)
+		mgmt.GET("/opencode-go/userscript-config", s.mgmt.GetOpenCodeGoUserscriptConfig)
 
 		mgmt.GET("/vertex-api-key", s.mgmt.GetVertexCompatKeys)
 		mgmt.PUT("/vertex-api-key", s.mgmt.PutVertexCompatKeys)
@@ -796,6 +856,10 @@ func (s *Server) pluginManagementNoRoute(c *gin.Context) {
 		return
 	}
 	path := c.Request.URL.Path
+	if rewriteUppercaseOpenAIV1Path(c) {
+		s.engine.HandleContext(c)
+		return
+	}
 	if strings.HasPrefix(path, "/v0/resource/plugins/") {
 		s.pluginResourceNoRoute(c)
 		return
@@ -826,6 +890,22 @@ func (s *Server) pluginManagementNoRoute(c *gin.Context) {
 	c.AbortWithStatus(http.StatusNotFound)
 }
 
+func rewriteUppercaseOpenAIV1Path(c *gin.Context) bool {
+	if c == nil || c.Request == nil || c.Request.URL == nil {
+		return false
+	}
+	path := c.Request.URL.Path
+	switch {
+	case path == "/V1":
+		c.Request.URL.Path = "/v1"
+	case strings.HasPrefix(path, "/V1/"):
+		c.Request.URL.Path = "/v1/" + strings.TrimPrefix(path, "/V1/")
+	default:
+		return false
+	}
+	return true
+}
+
 func (s *Server) pluginResourceNoRoute(c *gin.Context) {
 	if s == nil || c == nil || c.Request == nil || c.Request.URL == nil {
 		if c != nil {
@@ -845,12 +925,20 @@ func (s *Server) pluginResourceNoRoute(c *gin.Context) {
 }
 
 func (s *Server) serveManagementControlPanel(c *gin.Context) {
+	s.serveStaticPanel(c, managementasset.ManagementFileName)
+}
+
+func (s *Server) serveNextControlPanel(c *gin.Context) {
+	s.serveStaticPanel(c, "next.html")
+}
+
+func (s *Server) serveStaticPanel(c *gin.Context, name string) {
 	cfg := s.cfg
 	if cfg == nil || cfg.Home.Enabled || cfg.RemoteManagement.DisableControlPanel {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
-	filePath := managementasset.FilePath(s.configFilePath)
+	filePath := managementasset.FilePathFor(s.configFilePath, name)
 	if strings.TrimSpace(filePath) == "" {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
@@ -858,6 +946,10 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 
 	if _, err := os.Stat(filePath); err != nil {
 		if os.IsNotExist(err) {
+			if name != managementasset.ManagementFileName {
+				c.AbortWithStatus(http.StatusNotFound)
+				return
+			}
 			// Synchronously ensure management.html is available with a detached context.
 			// Control panel bootstrap should not be canceled by client disconnects.
 			if !managementasset.EnsureLatestManagementHTML(context.Background(), managementasset.StaticDir(s.configFilePath), cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository) {
@@ -973,6 +1065,10 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 				s.handleHomeCodexClientModels(c)
 				return
 			}
+			if snapshot := s.scopedModelsForRequest(c, "openai"); snapshot.scoped {
+				s.writeScopedModelsResponse(c, snapshot, scopedModelsResponseCodexClient)
+				return
+			}
 			openaiHandler.OpenAIModels(c)
 			return
 		}
@@ -984,8 +1080,16 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 
 		// Route to Claude handler for Anthropic API requests.
 		if isAnthropicModelsRequest(c) {
+			if snapshot := s.scopedModelsForRequest(c, "claude"); snapshot.scoped {
+				s.writeScopedModelsResponse(c, snapshot, scopedModelsResponseClaude)
+				return
+			}
 			claudeHandler.ClaudeModels(c)
 		} else {
+			if snapshot := s.scopedModelsForRequest(c, "openai"); snapshot.scoped {
+				s.writeScopedModelsResponse(c, snapshot, scopedModelsResponseOpenAI)
+				return
+			}
 			openaiHandler.OpenAIModels(c)
 		}
 	}
@@ -1026,6 +1130,10 @@ func (s *Server) geminiModelsHandler(geminiHandler *gemini.GeminiAPIHandler) gin
 			return
 		}
 
+		if snapshot := s.scopedModelsForRequest(c, "gemini"); snapshot.scoped {
+			s.writeScopedModelsResponse(c, snapshot, scopedModelsResponseGemini)
+			return
+		}
 		geminiHandler.GeminiModels(c)
 	}
 }
@@ -1039,6 +1147,74 @@ func (s *Server) geminiGetHandler(geminiHandler *gemini.GeminiAPIHandler) gin.Ha
 
 		geminiHandler.GeminiGetHandler(c)
 	}
+}
+
+func (s *Server) scopedModelsForRequest(c *gin.Context, handlerType string) scopedModelsSnapshot {
+	if s == nil || s.handlers == nil || s.handlers.AuthManager == nil {
+		return scopedModelsSnapshot{}
+	}
+
+	clientIDs, clientCacheKey, restricted := s.handlers.AuthManager.AllowedAuthIDCacheForAPIKey(ginUserAPIKey(c))
+	if !restricted {
+		return scopedModelsSnapshot{}
+	}
+	reg := registry.GetGlobalRegistry()
+	models, expiresAt, version := reg.GetAvailableModelsForClientCacheSnapshot(handlerType, clientCacheKey, clientIDs)
+	return scopedModelsSnapshot{
+		models:          models,
+		handlerType:     handlerType,
+		clientCacheKey:  clientCacheKey,
+		registryVersion: version,
+		expiresAt:       expiresAt,
+		scoped:          true,
+	}
+}
+
+func ginUserAPIKey(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+	raw, ok := c.Get("userApiKey")
+	if !ok {
+		return ""
+	}
+	switch value := raw.(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case []byte:
+		return strings.TrimSpace(string(value))
+	case fmt.Stringer:
+		return strings.TrimSpace(value.String())
+	default:
+		return strings.TrimSpace(fmt.Sprint(value))
+	}
+}
+
+func writeOpenAIModels(c *gin.Context, allModels []map[string]any) {
+	body, err := marshalOpenAIModels(allModels)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode models response"})
+		return
+	}
+	writeModelsJSONBody(c, body)
+}
+
+func writeClaudeModels(c *gin.Context, models []map[string]any) {
+	body, err := marshalClaudeModels(models)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode models response"})
+		return
+	}
+	writeModelsJSONBody(c, body)
+}
+
+func writeGeminiModels(c *gin.Context, rawModels []map[string]any) {
+	body, err := marshalGeminiModels(rawModels)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode models response"})
+		return
+	}
+	writeModelsJSONBody(c, body)
 }
 
 type homeModelEntry struct {
@@ -1635,6 +1811,8 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	applySignatureCacheConfig(oldCfg, cfg)
 
 	if s.handlers != nil && s.handlers.AuthManager != nil {
+		s.handlers.AuthManager.SetConfig(cfg)
+		s.handlers.AuthManager.SetOAuthModelAlias(cfg.OAuthModelAlias)
 		s.handlers.AuthManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second, cfg.MaxRetryCredentials)
 	}
 

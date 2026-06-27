@@ -243,6 +243,8 @@ type Manager struct {
 	// apiKeyModelAlias caches resolved model alias mappings for API-key auths.
 	// Keyed by auth.ID, value is alias(lower) -> upstream model (including suffix).
 	apiKeyModelAlias atomic.Value
+	// apiKeyAccessScopes caches resolved per-client API key access scopes.
+	apiKeyAccessScopes atomic.Value
 
 	// modelPoolOffsets tracks per-auth alias pool rotation state.
 	modelPoolOffsets map[string]int
@@ -282,6 +284,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
 	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
+	manager.apiKeyAccessScopes.Store(apiKeyAccessScopeTable(nil))
 	manager.scheduler = newAuthScheduler(selector)
 	return manager
 }
@@ -512,6 +515,7 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 	if !cfg.Home.Enabled {
 		m.clearHomeRuntimeAuths()
 	}
+	m.rebuildAPIKeyAccessScopesFromRuntimeConfig()
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	if clearedCooldowns {
 		m.persistCooldownStates(context.Background())
@@ -2110,6 +2114,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	m.mu.Lock()
 	m.auths[auth.ID] = authClone
 	m.mu.Unlock()
+	m.rebuildAPIKeyAccessScopesFromRuntimeConfig()
 	if !shouldDeferAPIKeyModelAliasRebuild(ctx) {
 		m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	}
@@ -2157,6 +2162,7 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	authClone := auth.Clone()
 	m.auths[auth.ID] = authClone
 	m.mu.Unlock()
+	m.rebuildAPIKeyAccessScopesFromRuntimeConfig()
 	if !shouldDeferAPIKeyModelAliasRebuild(ctx) {
 		m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	}
@@ -2206,6 +2212,7 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 	}
 	m.mu.Unlock()
 
+	m.rebuildAPIKeyAccessScopesFromRuntimeConfig()
 	if !shouldDeferAPIKeyModelAliasRebuild(ctx) {
 		m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	}
@@ -2260,6 +2267,7 @@ func (m *Manager) Load(ctx context.Context) error {
 	}
 	m.rebuildAPIKeyModelAliasLocked(cfg)
 	m.mu.Unlock()
+	m.rebuildAPIKeyAccessScopesFromRuntimeConfig()
 	m.syncScheduler()
 	return nil
 }
@@ -4283,6 +4291,14 @@ func shouldRetrySchedulerPick(err error) bool {
 	return authErr.Code == "auth_not_found" || authErr.Code == "auth_unavailable"
 }
 
+func isAuthNotFoundError(err error) bool {
+	var authErr *Error
+	if !errors.As(err, &authErr) || authErr == nil {
+		return false
+	}
+	return authErr.Code == "auth_not_found"
+}
+
 func (m *Manager) routeAwareSelectionRequired(auth *Auth, routeModel string) bool {
 	if auth == nil || strings.TrimSpace(routeModel) == "" {
 		return false
@@ -4298,6 +4314,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
+	scope := m.apiKeyAccessScopeForContext(ctx)
 
 	m.mu.RLock()
 	selector := m.selector
@@ -4321,6 +4338,9 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		if candidate == nil || executorKeyFromAuth(candidate) != provider || candidate.Disabled {
 			continue
 		}
+		if !scope.allows(candidate) {
+			continue
+		}
 		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
 			continue
 		}
@@ -4337,6 +4357,9 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	}
 	if len(candidates) == 0 {
 		m.mu.RUnlock()
+		if scope.restricted {
+			return nil, nil, apiKeyAccessDeniedError()
+		}
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	available, errAvailable := m.availableAuthsForRouteModel(candidates, provider, model, time.Now())
@@ -4378,6 +4401,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 		return auth, exec, err
 	}
 
+	scope := m.apiKeyAccessScopeForContext(ctx)
 	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
 		return m.pickNextLegacy(ctx, provider, model, opts, tried)
 	}
@@ -4385,6 +4409,9 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 		m.mu.RLock()
 		for _, candidate := range m.auths {
 			if candidate == nil || executorKeyFromAuth(candidate) != provider || candidate.Disabled {
+				continue
+			}
+			if !scope.allowsCachedAuthID(candidate) {
 				continue
 			}
 			if _, used := tried[candidate.ID]; used {
@@ -4403,15 +4430,33 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	}
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
 	for {
-		selected, errPick := m.scheduler.pickSingle(ctx, provider, model, opts, tried)
-		if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
-			m.syncScheduler()
+		var (
+			selected *Auth
+			errPick  error
+		)
+		if scope.restricted {
+			selected, errPick = m.scheduler.pickSingleScoped(ctx, provider, model, opts, tried, scope.allowsCachedAuthID)
+		} else {
 			selected, errPick = m.scheduler.pickSingle(ctx, provider, model, opts, tried)
 		}
+		if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
+			m.syncScheduler()
+			if scope.restricted {
+				selected, errPick = m.scheduler.pickSingleScoped(ctx, provider, model, opts, tried, scope.allowsCachedAuthID)
+			} else {
+				selected, errPick = m.scheduler.pickSingle(ctx, provider, model, opts, tried)
+			}
+		}
 		if errPick != nil {
+			if scope.restricted && isAuthNotFoundError(errPick) {
+				return nil, nil, apiKeyAccessDeniedError()
+			}
 			return nil, nil, errPick
 		}
 		if selected == nil {
+			if scope.restricted {
+				return nil, nil, apiKeyAccessDeniedError()
+			}
 			return nil, nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 		}
 		if disallowFreeAuth && isFreeCodexAuth(selected) {
@@ -4441,6 +4486,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
+	scope := m.apiKeyAccessScopeForContext(ctx)
 
 	providerSet := make(map[string]struct{}, len(providers))
 	for _, provider := range providers {
@@ -4471,6 +4517,9 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		if candidate == nil || candidate.Disabled {
 			continue
 		}
+		if !scope.allows(candidate) {
+			continue
+		}
 		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
 			continue
 		}
@@ -4497,6 +4546,9 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	}
 	if len(candidates) == 0 {
 		m.mu.RUnlock()
+		if scope.restricted {
+			return nil, nil, "", apiKeyAccessDeniedError()
+		}
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	available, errAvailable := m.availableAuthsForRouteModel(candidates, "mixed", model, time.Now())
@@ -4542,6 +4594,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		return m.pickNextViaHome(ctx, model, opts, tried)
 	}
 
+	scope := m.apiKeyAccessScopeForContext(ctx)
 	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
 		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 	}
@@ -4575,6 +4628,9 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 			if candidate == nil || candidate.Disabled {
 				continue
 			}
+			if !scope.allowsCachedAuthID(candidate) {
+				continue
+			}
 			if _, ok := providerSet[executorKeyFromAuth(candidate)]; !ok {
 				continue
 			}
@@ -4591,15 +4647,34 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
 	for {
-		selected, providerKey, errPick := m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
+		var (
+			selected    *Auth
+			providerKey string
+			errPick     error
+		)
+		if scope.restricted {
+			selected, providerKey, errPick = m.scheduler.pickMixedNormalized(ctx, eligibleProviders, model, opts, tried, scope.allowsCachedAuthID)
+		} else {
+			selected, providerKey, errPick = m.scheduler.pickMixedNormalized(ctx, eligibleProviders, model, opts, tried, nil)
+		}
 		if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
 			m.syncScheduler()
-			selected, providerKey, errPick = m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
+			if scope.restricted {
+				selected, providerKey, errPick = m.scheduler.pickMixedNormalized(ctx, eligibleProviders, model, opts, tried, scope.allowsCachedAuthID)
+			} else {
+				selected, providerKey, errPick = m.scheduler.pickMixedNormalized(ctx, eligibleProviders, model, opts, tried, nil)
+			}
 		}
 		if errPick != nil {
+			if scope.restricted && isAuthNotFoundError(errPick) {
+				return nil, nil, "", apiKeyAccessDeniedError()
+			}
 			return nil, nil, "", errPick
 		}
 		if selected == nil {
+			if scope.restricted {
+				return nil, nil, "", apiKeyAccessDeniedError()
+			}
 			return nil, nil, "", &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 		}
 		if disallowFreeAuth && isFreeCodexAuth(selected) {
@@ -4879,6 +4954,7 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	clientScope := m.apiKeyAccessScopeForContext(ctx)
 	executionSessionID := homeExecutionSessionIDFromMetadata(opts.Metadata)
 	count := homeAuthCountFromMetadata(opts.Metadata)
 	if cliproxyexecutor.DownstreamWebsocket(ctx) && executionSessionID != "" && count <= 1 {
@@ -4886,6 +4962,9 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 			_, alreadyTried := tried[pinnedAuthID]
 			if !alreadyTried {
 				if auth, executor, providerKey, ok := m.homeRuntimeAuthByID(executionSessionID, pinnedAuthID); ok {
+					if !clientScope.allows(auth) {
+						return nil, nil, "", apiKeyAccessDeniedError()
+					}
 					return auth, executor, providerKey, nil
 				}
 			}
@@ -4934,6 +5013,7 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 		return nil, nil, "", &Error{Code: "invalid_auth", Message: "home returned invalid auth payload", HTTPStatus: http.StatusBadGateway}
 	}
 	setHomeUserAPIKeyOnGinContext(ctx, dispatch.UserAPIKey)
+	scope := m.apiKeyAccessScopeForContext(ctx)
 	auth := dispatch.Auth
 	if strings.TrimSpace(auth.ID) == "" {
 		// Backward compatibility: older home instances returned the auth directly.
@@ -4956,6 +5036,9 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 	providerKey := executorKeyFromAuth(&auth)
 	if providerKey == "" {
 		return nil, nil, "", &Error{Code: "invalid_auth", Message: "home returned auth without provider", HTTPStatus: http.StatusBadGateway}
+	}
+	if !scope.allows(&auth) {
+		return nil, nil, "", apiKeyAccessDeniedError()
 	}
 
 	homeAuthIndex := strings.TrimSpace(dispatch.AuthIndex)
@@ -5011,6 +5094,7 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 		return nil, nil
 	}
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+	scope := m.apiKeyAccessScopeForContext(ctx)
 	var candidates []creditsCandidateEntry
 	m.mu.RLock()
 	for _, auth := range m.auths {
@@ -5018,6 +5102,9 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 			continue
 		}
 		if pinnedAuthID != "" && auth.ID != pinnedAuthID {
+			continue
+		}
+		if !scope.allows(auth) {
 			continue
 		}
 		if !strings.EqualFold(strings.TrimSpace(auth.Provider), "antigravity") {

@@ -204,6 +204,16 @@ func imagesModelBase(model string) string {
 	return strings.ToLower(strings.TrimSpace(baseModel))
 }
 
+func normalizeImagesRequestedModel(model string) string {
+	model = strings.TrimSpace(model)
+	baseModel := strings.TrimPrefix(imagesModelBase(model), "#")
+	baseModel = strings.ToLower(strings.TrimSpace(baseModel))
+	if baseModel == "" || baseModel == "unknown" {
+		return defaultImagesToolModel
+	}
+	return model
+}
+
 func isXAIImagesModel(model string) bool {
 	prefix, baseModel := imagesModelParts(model)
 	baseModel = strings.ToLower(strings.TrimSpace(baseModel))
@@ -603,10 +613,7 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 		return
 	}
 
-	imageModel := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
-	if imageModel == "" {
-		imageModel = defaultImagesToolModel
-	}
+	imageModel := normalizeImagesRequestedModel(gjson.GetBytes(rawJSON, "model").String())
 	if rejectUnsupportedImagesModel(c, imageModel) {
 		return
 	}
@@ -717,10 +724,7 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 		return
 	}
 
-	imageModel := strings.TrimSpace(c.PostForm("model"))
-	if imageModel == "" {
-		imageModel = defaultImagesToolModel
-	}
+	imageModel := normalizeImagesRequestedModel(c.PostForm("model"))
 	if rejectUnsupportedImagesModel(c, imageModel) {
 		return
 	}
@@ -890,10 +894,7 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 		return
 	}
 
-	imageModel := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
-	if imageModel == "" {
-		imageModel = defaultImagesToolModel
-	}
+	imageModel := normalizeImagesRequestedModel(gjson.GetBytes(rawJSON, "model").String())
 	if rejectUnsupportedImagesModel(c, imageModel) {
 		return
 	}
