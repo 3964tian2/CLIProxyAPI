@@ -434,7 +434,7 @@ func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
 		}
 		if c != nil && c.Request != nil {
 			path := c.Request.URL.Path
-			if strings.HasPrefix(path, "/v0/management/") || path == "/v0/management" || strings.HasPrefix(path, "/v0/resource/plugins/") || path == "/management.html" || path == "/next.html" {
+			if strings.HasPrefix(path, "/v0/management/") || path == "/v0/management" || strings.HasPrefix(path, "/v0/resource/plugins/") || path == "/management.html" {
 				c.Next()
 				return
 			}
@@ -463,7 +463,6 @@ func (s *Server) setupRoutes() {
 	s.engine.HEAD("/healthz", healthzHandler)
 
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
-	s.engine.GET("/next.html", s.serveNextControlPanel)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(s.handlers)
@@ -926,10 +925,6 @@ func (s *Server) pluginResourceNoRoute(c *gin.Context) {
 
 func (s *Server) serveManagementControlPanel(c *gin.Context) {
 	s.serveStaticPanel(c, managementasset.ManagementFileName)
-}
-
-func (s *Server) serveNextControlPanel(c *gin.Context) {
-	s.serveStaticPanel(c, "next.html")
 }
 
 func (s *Server) serveStaticPanel(c *gin.Context, name string) {

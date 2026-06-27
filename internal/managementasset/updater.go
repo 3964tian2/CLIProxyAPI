@@ -175,7 +175,7 @@ func FilePath(configFilePath string) string {
 	return FilePathFor(configFilePath, ManagementFileName)
 }
 
-// FilePathFor resolves the absolute path to a named control-panel asset (e.g. next.html)
+// FilePathFor resolves the absolute path to a named control-panel asset.
 // stored in the configured management static directory.
 func FilePathFor(configFilePath string, name string) string {
 	if override := strings.TrimSpace(os.Getenv("MANAGEMENT_STATIC_PATH")); override != "" {
