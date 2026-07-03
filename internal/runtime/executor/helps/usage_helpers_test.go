@@ -127,6 +127,20 @@ func TestParseClaudeUsageFallsBackCachedTokensToCacheCreation(t *testing.T) {
 	}
 }
 
+func TestDetachUsageContextPreservesValuesAfterCancel(t *testing.T) {
+	type key struct{}
+	parent, cancel := context.WithCancel(context.WithValue(context.Background(), key{}, "request-id"))
+	cancel()
+
+	detached := detachUsageContext(parent)
+	if err := detached.Err(); err != nil {
+		t.Fatalf("detached Err() = %v, want nil", err)
+	}
+	if got := detached.Value(key{}); got != "request-id" {
+		t.Fatalf("detached value = %v, want request-id", got)
+	}
+}
+
 func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 	reporter := &UsageReporter{
 		provider:    "openai",
