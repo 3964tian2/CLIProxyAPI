@@ -27,7 +27,7 @@ import (
 
 const (
 	defaultManagementReleaseURL  = "https://api.github.com/repos/kogekiplay/Cli-Proxy-API-Management-Center/releases/latest"
-	defaultManagementFallbackURL = "https://cpamc.router-for.me/"
+	defaultManagementFallbackURL = "https://github.com/kogekiplay/Cli-Proxy-API-Management-Center/releases/latest/download/management.html"
 	managementAssetName          = "management.html"
 	httpUserAgent                = "CLIProxyAPI-management-updater"
 	managementSyncMinInterval    = 30 * time.Second
