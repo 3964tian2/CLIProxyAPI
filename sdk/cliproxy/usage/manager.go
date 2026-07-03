@@ -13,6 +13,8 @@ import (
 // DefaultServiceTier is used when a request does not specify service_tier.
 const DefaultServiceTier = "default"
 
+const pluginDispatchTimeout = 30 * time.Second
+
 // Record contains the usage statistics captured for a single provider request.
 type Record struct {
 	Provider string
@@ -310,6 +312,11 @@ func safeInvoke(plugin Plugin, ctx context.Context, record Record) {
 			log.Errorf("usage: plugin panic recovered: %v", r)
 		}
 	}()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, pluginDispatchTimeout)
+	defer cancel()
 	plugin.HandleUsage(ctx, record)
 }
 
