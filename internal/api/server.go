@@ -1,4 +1,4 @@
-﻿// Package api provides the HTTP API server implementation for the CLI Proxy API.
+// Package api provides the HTTP API server implementation for the CLI Proxy API.
 // It includes the main server struct, routing setup, middleware for CORS and authentication,
 // and integration with various AI API handlers (OpenAI, Claude, Gemini).
 // The server supports hot-reloading of clients and configuration.
@@ -34,8 +34,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/usageledger"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/safemode"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usageledger"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
@@ -237,6 +237,11 @@ type Server struct {
 	// management handler
 	mgmt *managementHandlers.Handler
 
+	// usageLedger owns the local usage database for the lifetime of the server.
+	usageLedger          usageledger.Store
+	usageLedgerCloseOnce sync.Once
+	usageLedgerCloseErr  error
+
 	// pluginHost owns dynamic plugin Management API route dispatch.
 	pluginHost *pluginhost.Host
 
@@ -256,7 +261,7 @@ type Server struct {
 	keepAliveHeartbeat chan struct{}
 	keepAliveStop      chan struct{}
 
-	modelsResponseCache *modelsResponseCache
+	modelsResponseCache          *modelsResponseCache
 	exampleAPIKeySafeModeEnabled bool
 	exampleAPIKeySafeModeActive  atomic.Bool
 }
@@ -443,6 +448,7 @@ func (s *Server) initUsageLedger() {
 		log.WithError(err).Warn("usage ledger: failed to clean old events")
 	}
 	coreusage.RegisterNamedPlugin("usage-ledger", usageledger.NewPlugin(store, time.Now))
+	s.usageLedger = store
 	s.mgmt.SetUsageLedger(store)
 }
 
@@ -653,20 +659,6 @@ func (s *Server) setupRoutes() {
 		}
 		if state != "" {
 			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "antigravity", state, code, errStr)
-		}
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, oauthCallbackSuccessHTML)
-	})
-
-	s.engine.GET("/xai/callback", func(c *gin.Context) {
-		code := c.Query("code")
-		state := c.Query("state")
-		errStr := c.Query("error")
-		if errStr == "" {
-			errStr = c.Query("error_description")
-		}
-		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "xai", state, code, errStr)
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -885,6 +877,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/kimi-auth-url", s.mgmt.RequestKimiToken)
 		mgmt.GET("/xai-auth-url", s.mgmt.RequestXAIToken)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
+		mgmt.DELETE("/oauth-session", s.mgmt.CancelAuthSession)
 	}
 }
 
@@ -1366,6 +1359,16 @@ func formatHomeClaudeModels(entries []homeModelEntry) []map[string]any {
 	for _, entry := range entries {
 		out = append(out, formatHomeClaudeModel(entry))
 	}
+	sort.SliceStable(out, func(i, j int) bool {
+		di, _ := out[i]["display_name"].(string)
+		dj, _ := out[j]["display_name"].(string)
+		if di != dj {
+			return di < dj
+		}
+		idi, _ := out[i]["id"].(string)
+		idj, _ := out[j]["id"].(string)
+		return idi < idj
+	})
 	return out
 }
 
@@ -1383,7 +1386,7 @@ func formatHomeClaudeModel(entry homeModelEntry) map[string]any {
 		maxOutput = registry.DefaultClaudeMaxOutputTokens
 	}
 	model := map[string]any{
-		"id":               entry.id,
+		"id":               util.EnsureClaudeModelIDPrefix(entry.id),
 		"object":           "model",
 		"owned_by":         entry.ownedBy,
 		"type":             "model",
@@ -1796,9 +1799,22 @@ func (s *Server) Stop(ctx context.Context) error {
 	if err := s.server.Shutdown(ctx); err != nil {
 		return fmt.Errorf("failed to shutdown HTTP server: %v", err)
 	}
+	if errClose := s.closeUsageLedger(); errClose != nil {
+		return fmt.Errorf("failed to close usage ledger: %v", errClose)
+	}
 
 	log.Debug("API server stopped")
 	return nil
+}
+
+func (s *Server) closeUsageLedger() error {
+	if s == nil || s.usageLedger == nil {
+		return nil
+	}
+	s.usageLedgerCloseOnce.Do(func() {
+		s.usageLedgerCloseErr = s.usageLedger.Close()
+	})
+	return s.usageLedgerCloseErr
 }
 
 // corsMiddleware returns a Gin middleware handler that adds CORS headers

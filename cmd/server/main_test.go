@@ -95,7 +95,7 @@ func TestExampleConfigStartsNormalServer(t *testing.T) {
 		t.Fatalf("LoadConfigOptional(config.example.yaml) error = %v", err)
 	}
 
-	if shouldStartExampleAPIKeyWarningServer(cfg, false, false, false, false, false) {
-		t.Fatal("config.example.yaml should not trigger the example API key warning server")
+	if shouldEnableExampleAPIKeySafeMode(cfg, false, false, false, false, false) {
+		t.Fatal("config.example.yaml should not enable example API key safe mode")
 	}
 }
