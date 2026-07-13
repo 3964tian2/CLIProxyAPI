@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -11,6 +12,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
+
+var proxyTransportCache sync.Map
 
 // NewProxyAwareHTTPClient creates an HTTP client with proper proxy configuration priority:
 // 1. Use auth.ProxyURL if configured (highest priority)
@@ -31,10 +34,17 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		httpClient.Timeout = timeout
 	}
 
-	// Priority 1: Use auth.ProxyURL if configured
+	// Priority 1: Use auth.ProxyURL if configured.
 	var proxyURL string
 	if auth != nil {
 		proxyURL = strings.TrimSpace(auth.ProxyURL)
+	}
+	contextRT := contextRoundTripper(ctx)
+	if proxyURL != "" && contextRT != nil {
+		// The conductor injects a transport built and cached for auth.ProxyURL.
+		// Reusing it preserves keep-alive connections across requests.
+		httpClient.Transport = contextRT
+		return httpClient
 	}
 
 	// Priority 2: Use cfg.ProxyURL if auth proxy is not configured
@@ -54,11 +64,19 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	}
 
 	// Priority 3: Use RoundTripper from context (typically from RoundTripperFor)
-	if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
-		httpClient.Transport = rt
+	if contextRT != nil {
+		httpClient.Transport = contextRT
 	}
 
 	return httpClient
+}
+
+func contextRoundTripper(ctx context.Context) http.RoundTripper {
+	if ctx == nil {
+		return nil
+	}
+	rt, _ := ctx.Value("cliproxy.roundtripper").(http.RoundTripper)
+	return rt
 }
 
 // buildProxyTransport creates an HTTP transport configured for the given proxy URL.
@@ -70,10 +88,19 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 // Returns:
 //   - *http.Transport: A configured transport, or nil if the proxy URL is invalid
 func buildProxyTransport(proxyURL string) *http.Transport {
-	transport, _, errBuild := proxyutil.BuildHTTPTransport(proxyURL)
+	cacheKey := strings.TrimSpace(proxyURL)
+	if cached, ok := proxyTransportCache.Load(cacheKey); ok {
+		return cached.(*http.Transport)
+	}
+
+	transport, _, errBuild := proxyutil.BuildHTTPTransport(cacheKey)
 	if errBuild != nil {
 		log.Errorf("%v", errBuild)
 		return nil
 	}
-	return transport
+	if transport == nil {
+		return nil
+	}
+	actual, _ := proxyTransportCache.LoadOrStore(cacheKey, transport)
+	return actual.(*http.Transport)
 }
