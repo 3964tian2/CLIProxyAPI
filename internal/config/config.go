@@ -687,7 +687,7 @@ type OpenCodeGoUsageSnapshot struct {
 type OpenCodeGoUsageWindow struct {
 	Used    float64 `yaml:"used,omitempty" json:"used"`
 	Limit   float64 `yaml:"limit,omitempty" json:"limit"`
-	ResetAt string  `yaml:"reset-at,omitempty" json:"reset-at,omitempty"`
+	ResetAt string  `yaml:"reset-at,omitempty" json:"resetAt,omitempty"`
 }
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.

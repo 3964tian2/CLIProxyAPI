@@ -160,8 +160,8 @@ func TestOpenCodeGoRefreshUsageFetchesFromOpenCode(t *testing.T) {
 	if account.WorkspaceID != "wrk_test123" {
 		t.Fatalf("workspace id = %q, want wrk_test123", account.WorkspaceID)
 	}
-	if account.Usage.Rolling.Used != 0 || account.Usage.Weekly.Used != 0 || account.Usage.Monthly.Used != 0 {
-		t.Fatalf("usage persisted to config: %#v", account.Usage)
+	if account.Usage.Rolling.Limit != 100 || account.Usage.Weekly.Used != 40 || account.Usage.Monthly.Used != 20 {
+		t.Fatalf("usage was not persisted to config: %#v", account.Usage)
 	}
 	var body struct {
 		Account struct {
@@ -195,7 +195,7 @@ func TestOpenCodeGoRefreshUsageFetchesFromOpenCode(t *testing.T) {
 	}
 }
 
-func TestOpenCodeGoListAccountsOmitsPersistedUsage(t *testing.T) {
+func TestOpenCodeGoListAccountsReturnsPersistedUsage(t *testing.T) {
 	h := &Handler{cfg: &config.Config{
 		OpenCodeGo: config.OpenCodeGoConfig{
 			Accounts: []config.OpenCodeGoAccount{{
@@ -212,8 +212,11 @@ func TestOpenCodeGoListAccountsOmitsPersistedUsage(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	if strings.Contains(rec.Body.String(), `"usage"`) || strings.Contains(rec.Body.String(), "99") {
-		t.Fatalf("list response leaked persisted usage: %s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), `"usage"`) || !strings.Contains(rec.Body.String(), `"used":99`) {
+		t.Fatalf("list response omitted persisted usage: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"resetAt":"2026-06-24T12:00:00Z"`) {
+		t.Fatalf("list response omitted camel-case reset time: %s", rec.Body.String())
 	}
 }
 

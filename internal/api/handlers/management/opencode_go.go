@@ -424,6 +424,7 @@ func (h *Handler) RefreshOpenCodeGoUsage(c *gin.Context) {
 		return
 	}
 	h.cfg.OpenCodeGo.Accounts[idx].WorkspaceID = workspaceID
+	h.cfg.OpenCodeGo.Accounts[idx].Usage = usage
 	h.cfg.OpenCodeGo.Accounts[idx].UpdatedAt = now
 	view := openCodeGoAccountView(h.cfg.OpenCodeGo.Accounts[idx], h.cfg.OpenCodeGo)
 	view.Usage = &usage
@@ -1131,7 +1132,7 @@ func openCodeGoAccountView(account config.OpenCodeGoAccount, cfg config.OpenCode
 	if baseURL == "" {
 		baseURL = openCodeGoBaseURL(cfg)
 	}
-	return openCodeGoAccountResponse{
+	view := openCodeGoAccountResponse{
 		ID:                 account.ID,
 		Alias:              account.Alias,
 		Email:              account.Email,
@@ -1150,6 +1151,18 @@ func openCodeGoAccountView(account config.OpenCodeGoAccount, cfg config.OpenCode
 		UpdatedAt:          account.UpdatedAt,
 		LastSyncedAt:       account.LastSyncedAt,
 	}
+	if openCodeGoUsageSnapshotAvailable(account.Usage) {
+		usage := account.Usage
+		view.Usage = &usage
+	}
+	return view
+}
+
+func openCodeGoUsageSnapshotAvailable(usage config.OpenCodeGoUsageSnapshot) bool {
+	return usage.Rolling.Limit > 0 || usage.Weekly.Limit > 0 || usage.Monthly.Limit > 0 ||
+		strings.TrimSpace(usage.Rolling.ResetAt) != "" ||
+		strings.TrimSpace(usage.Weekly.ResetAt) != "" ||
+		strings.TrimSpace(usage.Monthly.ResetAt) != ""
 }
 
 func findOpenCodeGoAccountIndex(accounts []config.OpenCodeGoAccount, id, workspaceID, apiKey string) int {
