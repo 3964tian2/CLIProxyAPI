@@ -690,6 +690,7 @@ type OpenCodeGoAccount struct {
 	WorkspaceID        string                  `yaml:"workspace-id,omitempty" json:"workspace-id,omitempty"`
 	APIKey             string                  `yaml:"api-key,omitempty" json:"api-key,omitempty"`
 	Cookie             string                  `yaml:"cookie,omitempty" json:"cookie,omitempty"`
+	Note               string                  `yaml:"note,omitempty" json:"note,omitempty"`
 	Usage              OpenCodeGoUsageSnapshot `yaml:"usage,omitempty" json:"usage,omitempty"`
 	ProviderName       string                  `yaml:"provider-name,omitempty" json:"provider-name,omitempty"`
 	BaseURL            string                  `yaml:"base-url,omitempty" json:"base-url,omitempty"`

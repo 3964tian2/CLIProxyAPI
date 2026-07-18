@@ -235,8 +235,24 @@ func TestOpenCodeGoRefreshUsageRejectsLocaleOnlyCookie(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "cookie") || !strings.Contains(rec.Body.String(), "authentication") {
-		t.Fatalf("body = %s, want authentication cookie error", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "auth cookie") || !strings.Contains(rec.Body.String(), "account editor") {
+		t.Fatalf("body = %s, want account editor cookie error", rec.Body.String())
+	}
+}
+
+func TestNormalizeOpenCodeGoCookieInput(t *testing.T) {
+	t.Parallel()
+	tests := map[string]string{
+		"":                         "",
+		"Fe26.2**session-secret":   "auth=Fe26.2**session-secret",
+		"Fe26.2**session-secret=":  "auth=Fe26.2**session-secret=",
+		"auth=Fe26.2**secret":      "auth=Fe26.2**secret",
+		"oc_locale=zh; auth=value": "oc_locale=zh; auth=value",
+	}
+	for input, want := range tests {
+		if got := normalizeOpenCodeGoCookieInput(input); got != want {
+			t.Errorf("normalizeOpenCodeGoCookieInput(%q) = %q, want %q", input, got, want)
+		}
 	}
 }
 
@@ -333,6 +349,7 @@ func TestOpenCodeGoSyncCreatesAccountAndRedactsList(t *testing.T) {
 
 	rec := performOpenCodeGoJSON(http.MethodPost, "/v0/management/opencode-go/sync", map[string]any{
 		"alias":        "main",
+		"note":         "team workspace",
 		"email":        "user@example.com",
 		"workspace-id": "ws_123",
 		"api-key":      "sk-abcdefghijklmnopqrstuvwxyz",
@@ -368,6 +385,7 @@ func TestOpenCodeGoSyncCreatesAccountAndRedactsList(t *testing.T) {
 			APIKey        string `json:"api-key"`
 			Cookie        string `json:"cookie"`
 			HasCookie     bool   `json:"has-cookie"`
+			Note          string `json:"note"`
 		} `json:"accounts"`
 	}
 	if err := json.Unmarshal(list.Body.Bytes(), &body); err != nil {
@@ -386,6 +404,9 @@ func TestOpenCodeGoSyncCreatesAccountAndRedactsList(t *testing.T) {
 	if !account.HasCookie {
 		t.Fatalf("has-cookie = false, want true")
 	}
+	if account.Note != "team workspace" {
+		t.Fatalf("note = %q, want team workspace", account.Note)
+	}
 }
 
 func TestOpenCodeGoSyncUpdatesByWorkspaceAndPreservesOldUsageWhenOmitted(t *testing.T) {
@@ -398,24 +419,30 @@ func TestOpenCodeGoSyncUpdatesByWorkspaceAndPreservesOldUsageWhenOmitted(t *test
 
 	performOpenCodeGoJSON(http.MethodPost, "/v0/management/opencode-go/sync", map[string]any{
 		"alias":        "before",
+		"note":         "first workspace",
 		"workspace-id": "ws_123",
 		"api-key":      "sk-before",
+		"cookie":       "Fe26.2**session-secret",
 		"usage": map[string]any{
 			"weekly": map[string]any{"used": 7, "limit": 20},
 		},
 	}, h.SyncOpenCodeGoAccount)
 	performOpenCodeGoJSON(http.MethodPost, "/v0/management/opencode-go/sync", map[string]any{
+		"id":           h.cfg.OpenCodeGo.Accounts[0].ID,
 		"alias":        "after",
+		"note":         "updated note",
 		"workspace-id": "ws_123",
-		"api-key":      "sk-after",
 	}, h.SyncOpenCodeGoAccount)
 
 	if got := len(h.cfg.OpenCodeGo.Accounts); got != 1 {
 		t.Fatalf("accounts len = %d, want 1", got)
 	}
 	account := h.cfg.OpenCodeGo.Accounts[0]
-	if account.Alias != "after" || account.APIKey != "sk-after" {
+	if account.Alias != "after" || account.Note != "updated note" {
 		t.Fatalf("account not updated: %#v", account)
+	}
+	if account.APIKey != "sk-before" || account.Cookie != "auth=Fe26.2**session-secret" {
+		t.Fatalf("empty edit fields did not preserve secrets: %#v", account)
 	}
 	if account.Usage.Weekly.Used != 7 {
 		t.Fatalf("weekly usage = %v, want preserved 7", account.Usage.Weekly.Used)

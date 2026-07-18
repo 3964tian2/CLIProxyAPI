@@ -44,6 +44,7 @@ type openCodeGoSyncRequest struct {
 	WorkspaceID string                          `json:"workspace-id"`
 	APIKey      string                          `json:"api-key"`
 	Cookie      string                          `json:"cookie"`
+	Note        string                          `json:"note"`
 	Usage       *config.OpenCodeGoUsageSnapshot `json:"usage"`
 }
 
@@ -56,6 +57,7 @@ type openCodeGoAccountResponse struct {
 	APIKeyPreview      string                          `json:"api-key-preview,omitempty"`
 	HasAPIKey          bool                            `json:"has-api-key"`
 	HasCookie          bool                            `json:"has-cookie"`
+	Note               string                          `json:"note,omitempty"`
 	Usage              *config.OpenCodeGoUsageSnapshot `json:"usage,omitempty"`
 	ProviderName       string                          `json:"provider-name,omitempty"`
 	BaseURL            string                          `json:"base-url,omitempty"`
@@ -139,6 +141,7 @@ func (h *Handler) SyncOpenCodeGoAccount(c *gin.Context) {
 	account.Alias = strings.TrimSpace(req.Alias)
 	account.Email = strings.TrimSpace(req.Email)
 	account.Username = strings.TrimSpace(req.Username)
+	account.Note = strings.TrimSpace(req.Note)
 	account.WorkspaceID = req.WorkspaceID
 	if req.APIKey != "" {
 		if account.APIKey != req.APIKey {
@@ -149,7 +152,7 @@ func (h *Handler) SyncOpenCodeGoAccount(c *gin.Context) {
 		}
 		account.APIKey = req.APIKey
 	}
-	if cookie := strings.TrimSpace(req.Cookie); cookie != "" {
+	if cookie := normalizeOpenCodeGoCookieInput(req.Cookie); cookie != "" {
 		account.Cookie = cookie
 	}
 	if req.Usage != nil {
@@ -395,7 +398,7 @@ func (h *Handler) RefreshOpenCodeGoUsage(c *gin.Context) {
 		return
 	}
 	if openCodeGoCookieLooksUnauthenticated(cookie) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "opencode cookie does not include authentication cookies; resync with Tampermonkey cookie access enabled"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "opencode auth cookie is invalid; update Auth Cookie in the account editor"})
 		return
 	}
 
@@ -499,7 +502,7 @@ func fetchOpenCodeGoUsage(ctx context.Context, cookie, workspaceID string) (stri
 		return "", config.OpenCodeGoUsageSnapshot{}, fmt.Errorf("account cookie is empty")
 	}
 	if openCodeGoCookieLooksUnauthenticated(cookie) {
-		return "", config.OpenCodeGoUsageSnapshot{}, fmt.Errorf("opencode cookie does not include authentication cookies; resync with Tampermonkey cookie access enabled")
+		return "", config.OpenCodeGoUsageSnapshot{}, fmt.Errorf("opencode auth cookie is invalid; update Auth Cookie in the account editor")
 	}
 
 	workspaceID = strings.TrimSpace(workspaceID)
@@ -656,6 +659,23 @@ func openCodeGoCookieLooksUnauthenticated(cookie string) bool {
 		}
 	}
 	return true
+}
+
+// normalizeOpenCodeGoCookieInput accepts either a complete Cookie header or
+// the standalone OpenCode auth cookie value shown in browser developer tools.
+// OpenCode currently stores its iron-session value in the "auth" cookie.
+func normalizeOpenCodeGoCookieInput(cookie string) string {
+	cookie = strings.TrimSpace(cookie)
+	if cookie == "" {
+		return ""
+	}
+	if strings.HasPrefix(cookie, "Fe26.") {
+		return "auth=" + cookie
+	}
+	if strings.Contains(cookie, "=") {
+		return cookie
+	}
+	return "auth=" + cookie
 }
 
 func fetchOpenCodeGoModels(ctx context.Context, baseURL, apiKey string) ([]config.OpenAICompatibilityModel, error) {
@@ -1141,6 +1161,7 @@ func openCodeGoAccountView(account config.OpenCodeGoAccount, cfg config.OpenCode
 		APIKeyPreview:      maskOpenCodeGoSecret(account.APIKey),
 		HasAPIKey:          strings.TrimSpace(account.APIKey) != "",
 		HasCookie:          strings.TrimSpace(account.Cookie) != "",
+		Note:               account.Note,
 		ProviderName:       providerName,
 		BaseURL:            baseURL,
 		APIKeySynced:       account.APIKeySynced,
