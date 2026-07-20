@@ -746,6 +746,16 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		return
 	}
 	if len(fileHeaders) == 1 {
+		if isAuthArchive(fileHeaders[0].Filename) {
+			archive, errRead := readUploadedAuthFile(fileHeaders[0])
+			if errRead != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": errRead.Error()})
+				return
+			}
+			result := h.importAuthArchive(ctx, fileHeaders[0].Filename, archive)
+			h.writeAuthImportResult(c, result)
+			return
+		}
 		if _, errUpload := h.storeUploadedAuthFile(ctx, fileHeaders[0]); errUpload != nil {
 			if errors.Is(errUpload, errAuthFileMustBeJSON) {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "file must be .json"})
@@ -761,6 +771,21 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		uploaded := make([]string, 0, len(fileHeaders))
 		failed := make([]gin.H, 0)
 		for _, file := range fileHeaders {
+			if isAuthArchive(file.Filename) {
+				archive, errRead := readUploadedAuthFile(file)
+				if errRead != nil {
+					failed = append(failed, gin.H{"name": filepath.Base(file.Filename), "error": errRead.Error()})
+					continue
+				}
+				result := h.importAuthArchive(ctx, file.Filename, archive)
+				for _, name := range result.Files {
+					uploaded = append(uploaded, name)
+				}
+				for _, item := range result.Failed {
+					failed = append(failed, gin.H{"name": item.Name, "error": item.Error})
+				}
+				continue
+			}
 			name, errUpload := h.storeUploadedAuthFile(ctx, file)
 			if errUpload != nil {
 				failureName := ""
@@ -811,6 +836,38 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		return
 	}
 	c.JSON(200, gin.H{"status": "ok"})
+}
+
+func isAuthArchive(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	return strings.HasSuffix(name, ".zip") || strings.HasSuffix(name, ".tar") || strings.HasSuffix(name, ".tar.gz") || strings.HasSuffix(name, ".tgz")
+}
+
+func readUploadedAuthFile(file *multipart.FileHeader) ([]byte, error) {
+	if file == nil {
+		return nil, fmt.Errorf("no file uploaded")
+	}
+	if file.Size > maxAuthArchiveUncompressedTotal {
+		return nil, fmt.Errorf("archive exceeds upload limit")
+	}
+	src, err := file.Open()
+	if err != nil {
+		return nil, fmt.Errorf("failed to open uploaded archive: %w", err)
+	}
+	defer src.Close()
+	data, err := io.ReadAll(io.LimitReader(src, maxAuthArchiveUncompressedTotal+1))
+	if err != nil || len(data) > maxAuthArchiveUncompressedTotal {
+		return nil, fmt.Errorf("failed to read archive within allowed limit")
+	}
+	return data, nil
+}
+
+func (h *Handler) writeAuthImportResult(c *gin.Context, result authFileImportResult) {
+	if len(result.Failed) > 0 {
+		c.JSON(http.StatusMultiStatus, gin.H{"status": "partial", "uploaded": len(result.Files), "files": result.Files, "failed": result.Failed})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "uploaded": len(result.Files), "files": result.Files})
 }
 
 // Delete auth files: single by name or all

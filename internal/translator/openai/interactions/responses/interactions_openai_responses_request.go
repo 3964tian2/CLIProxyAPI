@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"bytes"
 	"strings"
 
 	"github.com/tidwall/gjson"
@@ -223,31 +224,47 @@ func appendResponsesInputItemToInteractions(out []byte, item gjson.Result, funct
 }
 
 func appendResponsesContentToInteractions(step []byte, content gjson.Result, stepType string) []byte {
+	parts := make([][]byte, 0)
 	if content.Type == gjson.String {
 		part := []byte(`{"type":"text","text":""}`)
 		part, _ = sjson.SetBytes(part, "text", content.String())
-		step, _ = sjson.SetRawBytes(step, "content.-1", part)
-		return step
-	}
-	if content.IsArray() {
+		parts = append(parts, part)
+	} else if content.IsArray() {
 		content.ForEach(func(_, item gjson.Result) bool {
 			if part, ok := responsesContentPartToInteractions(item); ok {
-				step, _ = sjson.SetRawBytes(step, "content.-1", part)
+				parts = append(parts, part)
 			}
 			return true
 		})
-		return step
-	}
-	if content.IsObject() {
+	} else if content.IsObject() {
 		if part, ok := responsesContentPartToInteractions(content); ok {
-			step, _ = sjson.SetRawBytes(step, "content.-1", part)
+			parts = append(parts, part)
 		}
-		return step
+	}
+	if len(parts) > 0 {
+		step, _ = sjson.SetRawBytes(step, "content", joinRawJSONArray(parts))
 	}
 	if stepType == "model_output" {
 		return step
 	}
 	return step
+}
+
+func joinRawJSONArray(items [][]byte) []byte {
+	if len(items) == 0 {
+		return []byte("[]")
+	}
+	var out bytes.Buffer
+	out.Grow(2 + len(items)*16)
+	out.WriteByte('[')
+	for index, item := range items {
+		if index > 0 {
+			out.WriteByte(',')
+		}
+		out.Write(item)
+	}
+	out.WriteByte(']')
+	return out.Bytes()
 }
 
 func responsesContentPartToInteractions(part gjson.Result) ([]byte, bool) {

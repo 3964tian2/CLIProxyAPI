@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,6 +10,32 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
+
+func TestFileTokenStoreListLoadsThousandCredentialsInStableOrder(t *testing.T) {
+	baseDir := t.TempDir()
+	for i := 999; i >= 0; i-- {
+		name := fmt.Sprintf("codex-%04d.json", i)
+		payload := []byte(fmt.Sprintf(`{"type":"codex","email":"user-%04d@example.test"}`, i))
+		if errWrite := os.WriteFile(filepath.Join(baseDir, name), payload, 0o600); errWrite != nil {
+			t.Fatalf("write %s: %v", name, errWrite)
+		}
+	}
+	store := NewFileTokenStore()
+	store.SetBaseDir(baseDir)
+	auths, errList := store.List(context.Background())
+	if errList != nil {
+		t.Fatalf("List() error = %v", errList)
+	}
+	if len(auths) != 1000 {
+		t.Fatalf("List() returned %d auths, want 1000", len(auths))
+	}
+	for i, auth := range auths {
+		want := fmt.Sprintf("codex-%04d.json", i)
+		if auth == nil || auth.ID != want {
+			t.Fatalf("auth[%d] = %#v, want id %q", i, auth, want)
+		}
+	}
+}
 
 func TestExtractAccessToken(t *testing.T) {
 	t.Parallel()

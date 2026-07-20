@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -58,6 +59,11 @@ type FileTokenStore struct {
 	dirLock sync.RWMutex
 	baseDir string
 }
+
+const (
+	defaultAuthLoadWorkers = 8
+	maxAuthLoadWorkers     = 32
+)
 
 // NewFileTokenStore creates a token store that saves credentials to disk through the
 // TokenStorage implementation embedded in the token record.
@@ -168,7 +174,7 @@ func (s *FileTokenStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error)
 	if dir == "" {
 		return nil, fmt.Errorf("auth filestore: directory not configured")
 	}
-	entries := make([]*cliproxyauth.Auth, 0)
+	paths := make([]string, 0)
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -179,17 +185,63 @@ func (s *FileTokenStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error)
 		if !strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
 			return nil
 		}
-		auths, errReadAuths := s.readAuthFiles(path, dir)
-		if errReadAuths != nil {
-			return nil
-		}
-		if len(auths) > 0 {
-			entries = append(entries, auths...)
-		}
+		paths = append(paths, path)
 		return nil
 	})
 	if err != nil {
 		return nil, err
+	}
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	sort.Strings(paths)
+	type result struct {
+		index int
+		auths []*cliproxyauth.Auth
+	}
+	workers := defaultAuthLoadWorkers
+	if workers > len(paths) {
+		workers = len(paths)
+	}
+	if workers > maxAuthLoadWorkers {
+		workers = maxAuthLoadWorkers
+	}
+	jobs := make(chan int, len(paths))
+	results := make(chan result, len(paths))
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range jobs {
+				if ctx != nil && ctx.Err() != nil {
+					return
+				}
+				auths, errReadAuths := s.readAuthFiles(paths[index], dir)
+				if errReadAuths == nil && len(auths) > 0 {
+					results <- result{index: index, auths: auths}
+				}
+			}
+		}()
+	}
+	go func() {
+		for index := range paths {
+			if ctx != nil && ctx.Err() != nil {
+				break
+			}
+			jobs <- index
+		}
+		close(jobs)
+		wg.Wait()
+		close(results)
+	}()
+	ordered := make([][]*cliproxyauth.Auth, len(paths))
+	for item := range results {
+		ordered[item.index] = item.auths
+	}
+	entries := make([]*cliproxyauth.Auth, 0, len(paths))
+	for _, auths := range ordered {
+		entries = append(entries, auths...)
 	}
 	return entries, nil
 }
