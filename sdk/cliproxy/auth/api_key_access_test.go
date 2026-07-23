@@ -11,6 +11,7 @@ import (
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
@@ -47,6 +48,8 @@ func (d *apiKeyAccessHomeDispatcher) HeartbeatOK() bool {
 func (d *apiKeyAccessHomeDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
 	return json.Marshal(d.response)
 }
+
+func (d *apiKeyAccessHomeDispatcher) AbortAmbiguousDispatch() {}
 
 func TestAPIKeyAccessScope_AllowsUnconfiguredKey(t *testing.T) {
 	m := NewManager(nil, &RoundRobinSelector{}, nil)
@@ -519,6 +522,7 @@ func TestAPIKeyAccessScope_HomeDispatchUsesDispatchedAPIKey(t *testing.T) {
 	})
 
 	m := NewManager(nil, &RoundRobinSelector{}, nil)
+	m.PublishHomeDispatch(dispatcher, executionregistry.New(), 0)
 	m.RegisterExecutor(schedulerTestExecutor{})
 	m.SetConfig(&internalconfig.Config{
 		Home: internalconfig.HomeConfig{Enabled: true},
